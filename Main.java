@@ -8,13 +8,24 @@ import java.util.stream.Collectors;
  *  Patterns used:
  *   1. Singleton               — UserRepository (single shared user storage)
  *   2. Builder                 — User.Builder (step-by-step profile creation)
- *   3. Factory Method          — NotifierFactory (Email / Telegram / SMS)
- *   4. Strategy                — MatchStrategy (interchangeable matching algorithms)
+ *   3. Factory Method          — ContactChannel.createNotifier() + NotifierFactory registry
+ *   4. Strategy                — MatchStrategy (matching algorithms)
+ *                                ContactChannel (one class per contact channel)
  *   5. Observer                — ClubEventBus (subscriptions to club events)
  *   6. Decorator               — ProfileView (badges and reading stats on a profile)
  *   7. Adapter                 — LegacyCatalogAdapter (old library catalog)
  *   8. Chain of Responsibility — RegistrationValidator (registration checks)
  *   9. Facade                  — BookLoversClub (simple entry point to the system)
+ * ---------------------------------------------------------------------
+ *  MD1 Group A - refactoring a growing switch
+ *   Before: NotifierFactory had a switch on the ContactChannel enum and
+ *           ContactValidator had a check only for EMAIL. For every new
+ *           channel we had to change these classes.
+ *   After:  each channel is a separate class that implements the
+ *           ContactChannel interface (Strategy). NotifierFactory keeps the
+ *           channels in a map, so there is no switch. To add a channel we
+ *           write a new class and register it (see part 7 of the demo).
+ *   The old code is in before/Main.java.
  * =====================================================================
  */
 
@@ -27,7 +38,7 @@ public class Main {
         System.out.println("===== 1. Registration (Builder + Chain of Responsibility + Singleton) =====");
         User aigerim = new User.Builder("Aigerim", 20)
                 .city("Almaty")
-                .contact(ContactChannel.TELEGRAM, "@aigerim_reads")
+                .contact("TELEGRAM", "@aigerim_reads")
                 .genres(Genre.FANTASY, Genre.CLASSIC, Genre.POETRY)
                 .authors("Mikhail Bulgakov", "J.K. Rowling")
                 .about("I love reading in coffee shops")
@@ -35,32 +46,32 @@ public class Main {
 
         User arman = new User.Builder("Arman", 22)
                 .city("Almaty")
-                .contact(ContactChannel.EMAIL, "arman@mail.kz")
+                .contact("EMAIL", "arman@mail.kz")
                 .genres(Genre.FANTASY, Genre.SCI_FI, Genre.CLASSIC)
                 .authors("Frank Herbert", "Mikhail Bulgakov")
                 .build();
 
         User dana = new User.Builder("Dana", 19)
                 .city("Astana")
-                .contact(ContactChannel.SMS, "+7 701 000 00 00")
+                .contact("SMS", "+7 701 000 00 00")
                 .genres(Genre.DETECTIVE, Genre.ROMANCE)
                 .authors("Agatha Christie")
                 .build();
 
         User timur = new User.Builder("Timur", 24)
                 .city("Almaty")
-                .contact(ContactChannel.TELEGRAM, "@timur_books")
+                .contact("TELEGRAM", "@timur_books")
                 .genres(Genre.NON_FICTION, Genre.SCI_FI, Genre.CLASSIC)
                 .authors("Yuval Noah Harari", "Erich Maria Remarque")
                 .build();
 
         User tooOld = new User.Builder("Victor", 45)
-                .contact(ContactChannel.EMAIL, "victor@mail.kz")
+                .contact("EMAIL", "victor@mail.kz")
                 .genres(Genre.CLASSIC)
                 .build();
 
         User noGenres = new User.Builder("Olzhas", 18)
-                .contact(ContactChannel.EMAIL, "olzhas@mail.kz")
+                .contact("EMAIL", "olzhas@mail.kz")
                 .build();
 
         club.register(aigerim);
@@ -115,14 +126,39 @@ public class Main {
 
         System.out.println("\n===== 6. Book club meetup (Observer) =====");
         club.announceMeetup("The Master and Margarita", "Bookworm Cafe, Almaty", "October 12, 6:00 PM");
+
+        System.out.println("\n===== 7. New channel WhatsApp, old code not changed (Strategy + Factory) =====");
+        System.out.println("Channels now: " + club.contactChannels());
+        try {
+            new User.Builder("Madina", 21).contact("WHATSAPP", "+77071234567");
+        } catch (IllegalArgumentException e) {
+            System.out.println("   Before registering: " + e.getMessage());
+        }
+
+        // we only register the new channel here, no old class is changed
+        club.addContactChannel(new WhatsAppChannel());
+        System.out.println("Channels now: " + club.contactChannels());
+
+        User madina = new User.Builder("Madina", 21)
+                .city("Almaty")
+                .contact("WHATSAPP", "+77071234567")
+                .genres(Genre.CLASSIC, Genre.POETRY)
+                .authors("Abai Kunanbaev")
+                .build();
+        User ruslan = new User.Builder("Ruslan", 23)
+                .contact("WHATSAPP", "my number")
+                .genres(Genre.SCI_FI)
+                .build();
+        club.register(madina);   // ok
+        club.register(ruslan);   // wrong number, WhatsAppChannel does not accept it
+        System.out.println("Meetup message (Madina gets it on WhatsApp):");
+        club.announceMeetup("The Little Prince", "Bookworm Cafe, Almaty", "October 19, 6:00 PM");
     }
 }
 
 // ============================== MODEL ===============================
 
 enum Genre { FANTASY, SCI_FI, DETECTIVE, CLASSIC, ROMANCE, NON_FICTION, POETRY }
-
-enum ContactChannel { EMAIL, TELEGRAM, SMS }
 
 class Book {
     private final String title;
@@ -193,7 +229,7 @@ class User {
         private final int age;
         private String city = "Not specified";
         private String contact = "";
-        private ContactChannel channel = ContactChannel.EMAIL;
+        private ContactChannel channel = NotifierFactory.channel("EMAIL");
         private String about = "";
         private final Set<Genre> favoriteGenres = new HashSet<>();
         private final Set<String> favoriteAuthors = new HashSet<>();
@@ -205,6 +241,8 @@ class User {
 
         Builder city(String city)                    { this.city = city; return this; }
         Builder contact(ContactChannel ch, String c) { this.channel = ch; this.contact = c; return this; }
+        /** Same as above, but finds the channel by name, for example "TELEGRAM". */
+        Builder contact(String channelCode, String c) { return contact(NotifierFactory.channel(channelCode), c); }
         Builder about(String about)                  { this.about = about; return this; }
         Builder genres(Genre... genres)              { favoriteGenres.addAll(Arrays.asList(genres)); return this; }
         Builder authors(String... authors)           { favoriteAuthors.addAll(Arrays.asList(authors)); return this; }
@@ -291,13 +329,12 @@ class ContactValidator extends RegistrationValidator {
     protected String check(User u) {
         String c = u.getContact();
         if (c == null || c.isEmpty()) return "Please provide a contact for notifications";
-        if (u.getChannel() == ContactChannel.EMAIL && !c.contains("@"))
-            return "Invalid e-mail address";
-        return null;
+        // no check for EMAIL here now, every channel checks its own contact
+        return u.getChannel().checkContact(c);
     }
 }
 
-// ======================= 3. FACTORY METHOD ==========================
+// ============ 3. FACTORY METHOD + STRATEGY (changed in MD1) ===============
 
 interface Notifier {
     void send(User to, String message);
@@ -321,14 +358,74 @@ class SmsNotifier implements Notifier {
     }
 }
 
-class NotifierFactory {
-    static Notifier create(ContactChannel channel) {
-        switch (channel) {
-            case TELEGRAM: return new TelegramNotifier();
-            case SMS:      return new SmsNotifier();
-            case EMAIL:
-            default:       return new EmailNotifier();
+/**
+ * Strategy pattern. Every contact channel is a class that implements this
+ * interface. All things that are different for each channel are inside the
+ * channel class, so other classes don't need a switch or "if EMAIL".
+ */
+interface ContactChannel {
+    /** Name of the channel, for example "EMAIL". We use it as the key in the map. */
+    String code();
+
+    /** Factory Method: the channel creates its own Notifier. */
+    Notifier createNotifier();
+
+    /** Checks the contact for this channel. Returns null if it is ok, or an error text. */
+    String checkContact(String contact);
+}
+
+class EmailChannel implements ContactChannel {
+    public String code()              { return "EMAIL"; }
+    public Notifier createNotifier()  { return new EmailNotifier(); }
+    public String checkContact(String c) { return c.contains("@") ? null : "Invalid e-mail address"; }
+}
+
+class TelegramChannel implements ContactChannel {
+    public String code()              { return "TELEGRAM"; }
+    public Notifier createNotifier()  { return new TelegramNotifier(); }
+    public String checkContact(String c) { return null; }   // no extra rule, same as before
+}
+
+class SmsChannel implements ContactChannel {
+    public String code()              { return "SMS"; }
+    public Notifier createNotifier()  { return new SmsNotifier(); }
+    public String checkContact(String c) { return null; }   // no extra rule, same as before
+}
+
+/**
+ * Factory with a map of channels instead of the old switch.
+ * The factory finds a channel by its name. New channels are added with
+ * register(), so we don't need to change this class again.
+ */
+final class NotifierFactory {
+    private static final Map<String, ContactChannel> CHANNELS = new LinkedHashMap<>();
+
+    static {    // channels that the club has from the start
+        register(new EmailChannel());
+        register(new TelegramChannel());
+        register(new SmsChannel());
+    }
+
+    private NotifierFactory() { }
+
+    static void register(ContactChannel channel) {
+        CHANNELS.put(channel.code().toUpperCase(Locale.ROOT), channel);
+    }
+
+    static ContactChannel channel(String code) {
+        ContactChannel channel = CHANNELS.get(code.toUpperCase(Locale.ROOT));
+        if (channel == null) {
+            throw new IllegalArgumentException("Unknown contact channel \"" + code
+                    + "\". Registered channels: " + CHANNELS.keySet());
         }
+        return channel;
+    }
+
+    static Set<String> registeredCodes() { return Collections.unmodifiableSet(CHANNELS.keySet()); }
+
+    /** Same method as before, so UserSubscriber still works without changes. */
+    static Notifier create(ContactChannel channel) {
+        return channel.createNotifier();
     }
 }
 
@@ -639,9 +736,36 @@ class BookLoversClub {
 
     int membersCount() { return repository.count(); }
 
+    /** Added in MD1: add a new contact channel to the club. */
+    void addContactChannel(ContactChannel channel) {
+        NotifierFactory.register(channel);
+        System.out.println("✔ New contact channel added: " + channel.code());
+    }
+
+    Set<String> contactChannels() { return NotifierFactory.registeredCodes(); }
+
     private Set<Genre> commonGenres(User a, User b) {
         Set<Genre> s = new HashSet<>(a.getFavoriteGenres());
         s.retainAll(b.getFavoriteGenres());
         return s;
+    }
+}
+
+// ================= NEW CHANNEL (MD1 demo) ===================
+// For WhatsApp we did not change the code above. We only wrote these
+// 2 classes and called club.addContactChannel(...) in main().
+
+class WhatsAppNotifier implements Notifier {
+    public void send(User to, String message) {
+        System.out.println("   [WhatsApp -> " + to.getContact() + "] " + message);
+    }
+}
+
+class WhatsAppChannel implements ContactChannel {
+    public String code()              { return "WHATSAPP"; }
+    public Notifier createNotifier()  { return new WhatsAppNotifier(); }
+    public String checkContact(String c) {
+        return c.matches("\\+?\\d{10,15}") ? null
+                : "Wrong WhatsApp number (use only digits, for example +77071234567)";
     }
 }
